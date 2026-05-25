@@ -347,7 +347,7 @@ It is a library of ready-to-use monitor configurations created by other users.
 
 # Dashboard Features
 
-## 7. Configurable Dashboard
+## 8. Configurable Dashboard
 
 Pulse provides a configurable main dashboard.
 
@@ -378,7 +378,7 @@ There should be only one time window selector near the Add Widget button.
 
 ---
 
-## 8. Dashboard Widgets
+## 9. Dashboard Widgets
 
 ### Metric Card
 
@@ -441,7 +441,7 @@ Queue Size
 
 # Alerts Features
 
-## 9. Alert Rules
+## 10. Alert Rules
 
 Users can create threshold-based alert rules for monitors.
 
@@ -462,7 +462,7 @@ Severity levels:
 
 ---
 
-## 10. Triggered Alerts
+## 11. Triggered Alerts
 
 When a monitor value violates an alert rule, Pulse creates a triggered alert.
 
