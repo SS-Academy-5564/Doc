@@ -166,3 +166,7 @@ Pulse.Worker  → Pulse.BL
 Pulse.BL      → Pulse.DAL, Pulse.Entities
 Pulse.DAL     → Pulse.Entities
 ```
+
+# Database ER Diagram
+
+Database ER diagram can be viewed by this [url](https://lucid.app/lucidchart/8125c771-2596-49a4-a1bc-67ecf6f0c553/edit?viewport_loc=-348%2C414%2C1662%2C881%2C0_0&invitationId=inv_7a7cdd54-1047-40e3-8d80-b68d521c6ecd "Database Url").
