@@ -1,10 +1,10 @@
 ---
-name: New task
-about: Create new task
+name: New story
+about: Create new user story
 title: ''
-labels: task
+labels: ''
 assignees: ''
-type: Task
+type: Story
 
 ---
 

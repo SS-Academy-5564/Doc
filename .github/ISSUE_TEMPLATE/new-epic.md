@@ -1,10 +1,10 @@
 ---
-name: New feature request
+name: New epic
 about: Suggest an idea for this project
 title: ''
 labels: ''
 assignees: ''
-type: Feature
+type: Epic
 
 ---
 
