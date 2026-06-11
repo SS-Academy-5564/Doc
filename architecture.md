@@ -140,12 +140,6 @@ DAL should not contain business logic.
 
 ---
 
-## Pulse.Entities
-
-Contains database entities and enums.
-
----
-
 ## Pulse.Worker
 
 Contains background polling worker.
