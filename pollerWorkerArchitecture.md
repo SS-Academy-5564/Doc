@@ -168,14 +168,19 @@ RequestStatus may contain:
 * NetworkError
 * UnexpectedError
 
-After saving the result, the worker updates the monitor:
+The poll result insert and monitor update must be committed atomically in the
+same database transaction. The worker adds the result and updates these monitor
+fields using the same `DbContext`, then calls `SaveChangesAsync` once:
+
 1. `CurrentValue` when a value is successfully extracted
 2. `LastCheckedAt`
 3. `LastStatusCode`
 4. `LastIsSuccess`
 5. `NextExecutionAt`
 
-Poll results must be persisted for both successful and failed checks.
+If the transaction fails, neither change is committed and the monitor remains
+due for a later worker iteration. Poll results must be persisted for both
+successful and failed checks.
 
 ## Error Handling and Logging
 
