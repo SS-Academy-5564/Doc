@@ -1,6 +1,6 @@
 # Polling Strategy
 
-For V1, the Poller Worker will use a fixed-interval polling strategy.
+For V1, the Poller Worker will use a fixed-delay polling strategy.
 
 The worker runs at a configurable interval, for example every 60 seconds. During each iteration, it selects enabled monitors that are due for execution and processes them in limited batches.
 
@@ -28,7 +28,7 @@ For V1, `NextExecutionAt` is calculated after each execution:
 NextExecutionAt = execution completed time + PollingIntervalSeconds
 ```
 
-This approach is simple and avoids overlapping executions for the same monitor within a single worker instance.
+This approach avoids overlapping executions for the same monitor within a single worker instance.
 
 ## Worker Implementation
 
@@ -86,18 +86,15 @@ public sealed class PollerWorker : BackgroundService
 ```
 
 `PollerWorker` is a singleton hosted service.
-A dependency injection scope is created for each iteration because `IPollingService` and the Dapper command/query services it depends on are registered as scoped. Database connections are created and disposed separately by each data-access operation.
+A dependency injection scope is created for each iteration because `IPollingService` depends on commands/queries which are registered as scoped. Database connections are created and disposed separately by each data-access operation.
 
+### Polling service
 The polling service is responsible for:
 
-1. Selecting due, enabled monitors from the database.
-2. Applying the configured `BatchSize`.
-3. Executing monitor checks with limited concurrency.
-4. Persisting poll results.
-5. Updating monitor scheduling fields.
-
-Checks are executed with `Parallel.ForEachAsync`, using
-`MaxDegreeOfParallelism = MaxConcurrentRequests`.
+1. Selecting due, enabled monitors.
+2. Executing monitor checks.
+3. Persisting poll result.
+4. Handling and logging monitor-level errors. 
 
 ## HTTP Request Execution
 
@@ -146,7 +143,7 @@ Retry policies, exponential backoff, retry handling for transient failures, and 
 
 Each monitor execution creates a separate poll result record.
 
-The result should contain:
+The poll result record should contain:
 
 - MonitorId
 - CheckedAt
@@ -165,15 +162,14 @@ RequestStatus may contain:
 - NetworkError
 - UnexpectedError
 
-The poll-result insert and monitor update must be committed atomically in the same database transaction.
-The polling service creates an IUnitOfWork, then inserts the result and updates the monitor using the unit of work’s shared connection and transaction.
-The transaction is committed only after both operations succeed; otherwise, it is rolled back.
+The poll-result insert and monitor update must be committed atomically.
+It means the changes are committed only after both operations succeed; otherwise, it is rolled back.
 
-1. `CurrentValue` when a value is successfully extracted
-2. `LastCheckedAt`
-3. `LastStatusCode`
-4. `LastIsSuccess`
-5. `NextExecutionAt`
+The monitor update:
+
+- `CurrentValue` when a value is successfully extracted
+- `LastCheckedAt`
+- `NextExecutionAt`
 
 If the transaction fails, neither change is committed and the monitor remains
 due for a later worker iteration. Poll results must be persisted for both
@@ -215,8 +211,6 @@ Sensitive values such as authorization headers, credentials, request bodies, and
 Add:
 
 - `NextExecutionAt DATETIME2 NOT NULL`
-- `LastStatusCode INT NULL`
-- `LastIsSuccess BIT NULL`
 
 Assume these fields already exist:
 
@@ -270,9 +264,6 @@ Add:
 - `BatchSize` limits the number of monitors selected per iteration.
 - `MaxConcurrentRequests` limits the number of parallel HTTP requests.
 
-`PollingIntervalSeconds` and `PollingTimeoutSeconds` are per-monitor values
-stored in the database, not worker-level settings.
-
 ## V1 Limitations
 
 - Only one Poller Worker instance is supported.
@@ -285,8 +276,8 @@ stored in the database, not worker-level settings.
 
 ## Future Improvements
 
-- Distributed locking or database leasing.
 - Support for multiple worker instances.
+- Distributed locking or database leasing.
 - Retry policies with exponential backoff.
 - Configurable accepted HTTP status codes.
 - Configurable redirect behavior.
