@@ -85,10 +85,8 @@ public sealed class PollerWorker : BackgroundService
 }
 ```
 
-`PollerWorker` is a singleton hosted service. An `IServiceScopeFactory` scope is
-created for each iteration so that `IPollingService` and its scoped dependencies,
-including `DbContext`, have the correct lifetime and are disposed after the
-iteration.
+`PollerWorker` is a singleton hosted service.
+A dependency injection scope is created for each iteration because `IPollingService` and the Dapper command/query services it depends on are registered as scoped. Database connections are created and disposed separately by each data-access operation.
 
 The polling service is responsible for:
 
@@ -99,9 +97,7 @@ The polling service is responsible for:
 5. Updating monitor scheduling fields.
 
 Checks are executed with `Parallel.ForEachAsync`, using
-`MaxDegreeOfParallelism = MaxConcurrentRequests`. Each parallel monitor
-execution must create its own dependency injection scope and resolve its own
-`DbContext`, because `DbContext` is not thread-safe. 
+`MaxDegreeOfParallelism = MaxConcurrentRequests`.
 
 ## HTTP Request Execution
 
@@ -117,26 +113,26 @@ to the polling service and persisted as failures.
 
 For V1, `PollingTimeoutSeconds` defines an overall request timeout covering:
 
-* DNS resolution
-* Connection establishment
-* TLS negotiation
-* Waiting for the HTTP response
-* Reading the response
+- DNS resolution
+- Connection establishment
+- TLS negotiation
+- Waiting for the HTTP response
+- Reading the response
 
 Separate connection, response-header, and response-body timeouts are postponed
 for future versions.
 
 ### Failures
 
-| Situation | Stored result |
-| --- | --- |
-| HTTP 200–299 | Success |
-| HTTP 300–399 | Failed with HTTP status code |
-| HTTP 400–499 | Failed with HTTP status code |
-| HTTP 500–599 | Failed with HTTP status code |
-| Request timeout | Failed with `Timeout` status |
+| Situation                     | Stored result                     |
+| ----------------------------- | --------------------------------- |
+| HTTP 200–299                  | Success                           |
+| HTTP 300–399                  | Failed with HTTP status code      |
+| HTTP 400–499                  | Failed with HTTP status code      |
+| HTTP 500–599                  | Failed with HTTP status code      |
+| Request timeout               | Failed with `Timeout` status      |
 | DNS, TLS, or connection error | Failed with `NetworkError` status |
-| Worker shutdown cancellation | No result is persisted |
+| Worker shutdown cancellation  | No result is persisted            |
 
 ### Retries
 
@@ -152,25 +148,25 @@ Each monitor execution creates a separate poll result record.
 
 The result should contain:
 
-* MonitorId
-* CheckedAt
-* IsSuccess
-* StatusCode
-* ResponseTimeMs
-* RequestStatus
-* ErrorMessage
+- MonitorId
+- CheckedAt
+- IsSuccess
+- StatusCode
+- ResponseTimeMs
+- RequestStatus
+- ErrorMessage
 
 RequestStatus may contain:
 
-* Success
-* Failed
-* Timeout
-* NetworkError
-* UnexpectedError
+- Success
+- Failed
+- Timeout
+- NetworkError
+- UnexpectedError
 
-The poll result insert and monitor update must be committed atomically in the
-same database transaction. The worker adds the result and updates these monitor
-fields using the same `DbContext`, then calls `SaveChangesAsync` once:
+The poll-result insert and monitor update must be committed atomically in the same database transaction.
+The polling service creates an IUnitOfWork, then inserts the result and updates the monitor using the unit of work’s shared connection and transaction.
+The transaction is committed only after both operations succeed; otherwise, it is rolled back.
 
 1. `CurrentValue` when a value is successfully extracted
 2. `LastCheckedAt`
@@ -185,6 +181,7 @@ successful and failed checks.
 ## Error Handling and Logging
 
 Errors are handled at two levels: monitor-level and worker-level.
+
 ### Monitor-Level Errors
 
 A failed monitor request must not interrupt processing of other monitors in the batch.
@@ -201,12 +198,12 @@ Unexpected errors during a worker iteration, such as database failures, are logg
 
 Logs should include:
 
-* Monitor identifier
-* Execution duration
-* HTTP status code
-* Result status
-* Error type
-* Exception details for unexpected failures
+- Monitor identifier
+- Execution duration
+- HTTP status code
+- Result status
+- Error type
+- Exception details for unexpected failures
 
 Sensitive values such as authorization headers, credentials, request bodies, and response bodies must not be logged.
 
@@ -216,17 +213,17 @@ Sensitive values such as authorization headers, credentials, request bodies, and
 
 Add:
 
-* `NextExecutionAt DATETIME2 NOT NULL`
-* `LastStatusCode INT NULL`
-* `LastIsSuccess BIT NULL`
+- `NextExecutionAt DATETIME2 NOT NULL`
+- `LastStatusCode INT NULL`
+- `LastIsSuccess BIT NULL`
 
 Assume these fields already exist:
 
-* `PollingIntervalSeconds`
-* `PollingTimeoutSeconds`
-* `CurrentValue`
-* `LastCheckedAt`
-* `StatusId`
+- `PollingIntervalSeconds`
+- `PollingTimeoutSeconds`
+- `CurrentValue`
+- `LastCheckedAt`
+- `StatusId`
 
 When a monitor is created or enabled, `NextExecutionAt` is set to the current
 UTC time.
@@ -241,19 +238,20 @@ Add an index to support efficient selection of due monitors:
 
 Create a separate table for poll result history with:
 
-* `Id`
-* `MonitorId`
-* `CheckedAt`
-* `IsSuccess`
-* `StatusCode`
-* `ResponseTimeMs`
-* `RequestStatus`
-* `ErrorMessage`
+- `Id`
+- `MonitorId`
+- `Value`
+- `CheckedAt`
+- `IsSuccess`
+- `StatusCode`
+- `ResponseTimeMs`
+- `RequestStatus`
+- `ErrorMessage`
 
 Add:
 
-* A foreign key from `MonitorId` to `Monitors(Id)`
-* An index on `(MonitorId, CheckedAt DESC)`
+- A foreign key from `MonitorId` to `Monitors(Id)`
+- An index on `(MonitorId, CheckedAt DESC)`
 
 ## Required Configuration Changes
 
@@ -267,33 +265,33 @@ Add:
 }
 ```
 
-* `LoopIntervalSeconds` defines how often the worker checks for due monitors.
-* `BatchSize` limits the number of monitors selected per iteration.
-* `MaxConcurrentRequests` limits the number of parallel HTTP requests.
+- `LoopIntervalSeconds` defines how often the worker checks for due monitors.
+- `BatchSize` limits the number of monitors selected per iteration.
+- `MaxConcurrentRequests` limits the number of parallel HTTP requests.
 
 `PollingIntervalSeconds` and `PollingTimeoutSeconds` are per-monitor values
 stored in the database, not worker-level settings.
 
 ## V1 Limitations
 
-* Only one Poller Worker instance is supported.
-* Multiple instances may cause duplicate executions because there is no distributed lock or lease.
-* No retries or exponential backoff.
-* No priority scheduling.
-* No poll result retention or cleanup.
-* Redirects are always treated as failures; redirect behavior is not configurable.
-* No per-monitor retry or backoff configuration.
+- Only one Poller Worker instance is supported.
+- Multiple instances may cause duplicate executions because there is no distributed lock or lease.
+- No retries or exponential backoff.
+- No priority scheduling.
+- No poll result retention or cleanup.
+- Redirects are always treated as failures; redirect behavior is not configurable.
+- No per-monitor retry or backoff configuration.
 
 ## Future Improvements
 
-* Distributed locking or database leasing.
-* Support for multiple worker instances.
-* Retry policies with exponential backoff.
-* Configurable accepted HTTP status codes.
-* Configurable redirect behavior.
-* Per-monitor retry and backoff configuration.
-* Priority scheduling.
-* Poll result retention and cleanup.
-* Metrics, health checks, and alerting.
-* Adaptive polling intervals based on monitor state.
-* Separate connection, response-header, and response-body timeouts.
+- Distributed locking or database leasing.
+- Support for multiple worker instances.
+- Retry policies with exponential backoff.
+- Configurable accepted HTTP status codes.
+- Configurable redirect behavior.
+- Per-monitor retry and backoff configuration.
+- Priority scheduling.
+- Poll result retention and cleanup.
+- Metrics, health checks, and alerting.
+- Adaptive polling intervals based on monitor state.
+- Separate connection, response-header, and response-body timeouts.
