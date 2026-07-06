@@ -153,6 +153,7 @@ The result should contain:
 - IsSuccess
 - StatusCode
 - ResponseTimeMs
+- Value
 - RequestStatus
 - ErrorMessage
 
