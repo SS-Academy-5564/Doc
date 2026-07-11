@@ -294,6 +294,7 @@ Add:
 
 - Support for multiple worker instances.
 - Distributed locking or database leasing.
+- Monitor checks run concurrently
 - Retry policies with exponential backoff.
 - Configurable accepted HTTP status codes.
 - Configurable redirect behavior.
