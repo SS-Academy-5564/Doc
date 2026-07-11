@@ -1,14 +1,16 @@
 # Polling Strategy
 
-For V1, the Poller Worker will use a fixed-delay polling strategy.
+For V1, the Poller Worker uses a fixed-delay polling strategy.
 
-The worker runs at a configurable interval, for example every 60 seconds. During each iteration, it selects enabled monitors that are due for execution and processes them in limited batches.
+The worker runs at a configurable interval. During each iteration, it selects up
+to `BatchSize` enabled monitors that are due for execution and processes them
+sequentially.
 
 A monitor is considered due when:
 
 ```sql
-WHERE StatusId = 'Enabled'
-  AND NextExecutionAt <= SYSUTCDATETIME()
+WHERE NextExecutionAt <= SYSUTCDATETIME()
+  AND StatusId = (SELECT Id FROM MonitorStatuses WHERE Name = 'Enabled')
 ```
 
 ## Monitor Scheduling and Selection
@@ -16,10 +18,10 @@ WHERE StatusId = 'Enabled'
 Each worker iteration performs the following steps:
 
 1. Find enabled monitors where `NextExecutionAt` is less than or equal to the current UTC time.
-2. Take a limited batch of due monitors.
-3. Execute up to N monitor checks in parallel.
+2. Take up to the configured `BatchSize` of due monitors.
+3. Execute monitor checks one by one.
 4. Persist a poll result for every completed execution.
-5. Update the monitor’s NextExecutionAt.
+5. Update the monitor's `LastCheckedAt` and `NextExecutionAt`.
 6. Repeat after the configured worker interval.
 
 For V1, `NextExecutionAt` is calculated after each execution:
@@ -32,9 +34,10 @@ This approach avoids overlapping executions for the same monitor within a single
 
 ## Worker Implementation
 
-The worker will be implemented using BackgroundService.
+The worker is implemented using `BackgroundService`.
 
-PollerWorker is responsible only for repeatedly triggering the polling process. The main polling logic should be placed in a separate service, such as PollingService.
+`PollerWorker` is responsible only for repeatedly triggering the polling process.
+The main polling logic is placed in `PollingService`.
 
 ```csharp
 public sealed class PollerWorker : BackgroundService
@@ -86,19 +89,26 @@ public sealed class PollerWorker : BackgroundService
 ```
 
 `PollerWorker` is a singleton hosted service.
-A dependency injection scope is created for each iteration because `IPollingService` depends on commands/queries which are registered as scoped. Database connections are created and disposed separately by each data-access operation.
+A dependency injection scope is created for each iteration because `IPollingService` depends on commands/queries which are registered as scoped. Each processed monitor creates its own unit of work for the poll-result insert and monitor update.
 
 ### Polling service
+
 The polling service is responsible for:
 
 1. Selecting due, enabled monitors.
 2. Executing monitor checks.
-3. Persisting poll result.
-4. Handling and logging monitor-level errors. 
+3. Extracting the configured value from successful JSON responses.
+4. Persisting poll result and monitor schedule update in one transaction.
+5. Handling and logging monitor-level errors.
+
+Monitor processing is sequential for V1.
+If one monitor fails unexpectedly, the failure is logged with the monitor id and the remaining monitors in the batch continue processing.
+
+Cancellation is treated differently from normal failures. If the worker shutdown token is cancelled, `OperationCanceledException` is rethrown so the worker can stop cleanly.
 
 ## HTTP Request Execution
 
-HTTP requests should be executed through `IHttpClientFactory`.
+HTTP requests are executed through `IHttpClientFactory`.
 
 Each monitor execution sends one HTTP request. The overall timeout is read from
 the monitor's `PollingTimeoutSeconds` value.
@@ -121,15 +131,16 @@ for future versions.
 
 ### Failures
 
-| Situation                     | Stored result                     |
-| ----------------------------- | --------------------------------- |
-| HTTP 200–299                  | Success                           |
-| HTTP 300–399                  | Failed with HTTP status code      |
-| HTTP 400–499                  | Failed with HTTP status code      |
-| HTTP 500–599                  | Failed with HTTP status code      |
-| Request timeout               | Failed with `Timeout` status      |
-| DNS, TLS, or connection error | Failed with `NetworkError` status |
-| Worker shutdown cancellation  | No result is persisted            |
+| Situation                     | Stored result                         |
+| ----------------------------- | ---------------------------------     |
+| HTTP 200–299                  | Success                               |
+| HTTP 300–399                  | Failed with HTTP status code          |
+| HTTP 400–499                  | Failed with HTTP status code          |
+| HTTP 500–599                  | Failed with HTTP status code          |
+| Request timeout               | Failed with `Timeout` status          |
+| DNS, TLS, or connection error | Failed with `NetworkError` status     |
+| JSON value extraction failure | Failed with `ExtractionError` status  |
+| Worker shutdown cancellation  | No result is persisted                |
 
 ### Retries
 
@@ -152,7 +163,6 @@ The poll result record should contain:
 - ResponseTimeMs
 - Value
 - RequestStatus
-- ErrorMessage
 
 RequestStatus may contain:
 
@@ -160,16 +170,20 @@ RequestStatus may contain:
 - Failed
 - Timeout
 - NetworkError
+- ExtractionError = request succeeded, but expected value could not be extracted from response body.
 - UnexpectedError
 
 The poll-result insert and monitor update must be committed atomically.
 It means the changes are committed only after both operations succeed; otherwise, it is rolled back.
 
-The monitor update:
+The monitor update includes:
 
-- `CurrentValue` when a value is successfully extracted
+- `CurrentValue` only when a non-null value is successfully extracted
 - `LastCheckedAt`
 - `NextExecutionAt`
+
+When extraction fails or produces a null value, the existing `CurrentValue` is
+preserved while `LastCheckedAt` and `NextExecutionAt` are still updated.
 
 If the transaction fails, neither change is committed and the monitor remains
 due for a later worker iteration. Poll results must be persisted for both
@@ -185,7 +199,11 @@ A failed monitor request must not interrupt processing of other monitors in the 
 
 Expected failures, such as timeouts, DNS failures, TLS failures, connection failures, and non-success HTTP status codes, are persisted as failed poll results.
 
+Extraction failures are handled separately from unexpected exceptions. The HTTP request already completed, so the result keeps the HTTP status code and response time, but stores `ExtractionError` and no extracted value.
+
 Unexpected exceptions are logged and persisted as UnexpectedError when possible.
+
+Persistence failures are logged by the per-monitor guard. If the transaction fails, the poll result and monitor update are both rolled back, and the monitor remains due for a later iteration.
 
 ### Worker-Level Errors
 
@@ -241,7 +259,6 @@ Create a separate table for poll result history with:
 - `StatusCode`
 - `ResponseTimeMs`
 - `RequestStatus`
-- `ErrorMessage`
 
 Add:
 
@@ -254,20 +271,19 @@ Add:
 {
   "PollingWorker": {
     "LoopIntervalSeconds": 60,
-    "BatchSize": 50,
-    "MaxConcurrentRequests": 10
+    "BatchSize": 50
   }
 }
 ```
 
 - `LoopIntervalSeconds` defines how often the worker checks for due monitors.
 - `BatchSize` limits the number of monitors selected per iteration.
-- `MaxConcurrentRequests` limits the number of parallel HTTP requests.
 
 ## V1 Limitations
 
 - Only one Poller Worker instance is supported.
 - Multiple instances may cause duplicate executions because there is no distributed lock or lease.
+- Monitor checks run sequentially inside each worker iteration.
 - No retries or exponential backoff.
 - No priority scheduling.
 - No poll result retention or cleanup.
